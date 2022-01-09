@@ -6,7 +6,6 @@ from utils import rend_util
 from model.embedder import *
 from model.ray_tracing import RayTracing
 from model.sample_network import SampleNetwork
-from model.mvsnet import MVSNet
 
 class ImplicitNetwork(nn.Module):
     def __init__(
@@ -15,12 +14,11 @@ class ImplicitNetwork(nn.Module):
             d_in,
             d_out,
             dims,
-            encoding_volume_size,
             geometric_init=True,
             bias=1.0,
             skip_in=(),
             weight_norm=True,
-            multires=0            
+            multires=0
     ):
         super().__init__()
 
@@ -34,7 +32,6 @@ class ImplicitNetwork(nn.Module):
 
         self.num_layers = len(dims)
         self.skip_in = skip_in
-        self.feature_linear = nn.Linear(encoding_volume_size, input_ch)
 
         for l in range(0, self.num_layers - 1):
             if l + 1 in self.skip_in:
@@ -67,11 +64,9 @@ class ImplicitNetwork(nn.Module):
 
         self.softplus = nn.Softplus(beta=100)
 
-    def forward(self, input, encoding_volume, compute_grad=False):
+    def forward(self, input, compute_grad=False):
         if self.embed_fn is not None:
             input = self.embed_fn(input)
-        
-        encoding_feature = self.feature_linear(encoding_volume)
 
         x = input
 
@@ -81,7 +76,7 @@ class ImplicitNetwork(nn.Module):
             if l in self.skip_in:
                 x = torch.cat([x, input], 1) / np.sqrt(2)
 
-            x = lin(x) * encoding_feature
+            x = lin(x)
 
             if l < self.num_layers - 2:
                 x = self.softplus(x)
@@ -164,87 +159,53 @@ class RenderingNetwork(nn.Module):
 class IDRNetwork(nn.Module):
     def __init__(self, conf):
         super().__init__()
-        self.image = conf.get_config('image')
-        self.proj_mats, self.near_far = conf.get_config('mvsnet')
-        self.encoding_volume = MVSNet(self.image, self.proj_mats, self.near_far)
         self.feature_vector_size = conf.get_int('feature_vector_size')
         self.implicit_network = ImplicitNetwork(self.feature_vector_size, **conf.get_config('implicit_network'))
-        # SDF
         self.rendering_network = RenderingNetwork(self.feature_vector_size, **conf.get_config('rendering_network'))
-        # Render
         self.ray_tracer = RayTracing(**conf.get_config('ray_tracer'))
-        # 需要反向传播吗
         self.sample_network = SampleNetwork()
-        # 需要反向传播吗
         self.object_bounding_sphere = conf.get_float('ray_tracer.object_bounding_sphere')
-        # 给定的
-        # 一个数 到时候可以输出来看一看
 
     def forward(self, input):
-        # input是一个dict
+
         # Parse model input
         intrinsics = input["intrinsics"]
         uv = input["uv"]
-        # 是什么呢
+        # print("uv shape:", uv.shape) [1, 2048, 2]
+        # print("uv", uv[:, :5, :]) 整数对，对应像素
         pose = input["pose"]
+        # print("pose shape", pose.shape) [1, 4, 4]
+        # print("pose", pose)
         object_mask = input["object_mask"].reshape(-1)
 
         ray_dirs, cam_loc = rend_util.get_camera_params(uv, pose, intrinsics)
-        # ray_dirs shape
-            # 猜想 包含了每张图片中的一个[ray_dir, cam_loc]组合，所以应该有一个维度是和该场景训练集中图片数量相等
-        print('ray_dirs.shape', ray_dirs.shape)
-        print('cam_loc.shape', cam_loc.shape)
-        # [1, 10000, 3] --> [1, 2048, 3]
 
         batch_size, num_pixels, _ = ray_dirs.shape
-        # ray_dirs是三维的
-        # num_pixels是什么的num
-            # 是图片的大小吗？ 应该就是图片的总像素个数
-            # 是每条射线的长度吗？
-        # batch_size = 1, num_pixels = 10000
 
         self.implicit_network.eval()
-        # ？？？？
         with torch.no_grad():
-            points, network_object_mask, dists = self.ray_tracer(sdf=lambda x: self.implicit_network(x, self.encoding_volume)[:, 0],
+            points, network_object_mask, dists = self.ray_tracer(sdf=lambda x: self.implicit_network(x)[:, 0],
                                                                  cam_loc=cam_loc,
                                                                  object_mask=object_mask,
                                                                  ray_directions=ray_dirs)
-            # ray_tracer不求梯度
+        # print(points, 2222222222222222222222222222222, points.shape)
         self.implicit_network.train()
-        # ？？？？
 
         points = (cam_loc.unsqueeze(1) + dists.reshape(batch_size, num_pixels, 1) * ray_dirs).reshape(-1, 3)
-        # 应该是表面上的点
-            # 所有表面上的点吗？
-            # shape是什么
 
-
-        sdf_output = self.implicit_network(points, self.encoding_volume)[:, 0:1]
-        print('sdf_output.shape', sdf_output.shape)
-        # [2048, 1]
-        # 提取sdf输出 最后一维 的 第一个分量，作为sdf_output
+        sdf_output = self.implicit_network(points)[:, 0:1]
         ray_dirs = ray_dirs.reshape(-1, 3)
-        print('ray_dirs.shape', ray_dirs.shape)
-        # [2048, 3]
 
         if self.training:
             surface_mask = network_object_mask & object_mask
-            # network_object_mask: ray_tracer输出 object_mask: 输入
-                # object_mask 在IDR的正向传播过程中只在此处用到了吗？
-                # 看起来是这样的，但是返回的时候呢又返回了这个object_mask，看起来是为了后续计算方便
             surface_points = points[surface_mask]
             surface_dists = dists[surface_mask].unsqueeze(-1)
             surface_ray_dirs = ray_dirs[surface_mask]
-            # 这说明，ray_dirs这个数组其实是给了每个点的ray_dirs
             surface_cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[surface_mask]
             surface_output = sdf_output[surface_mask]
             N = surface_points.shape[0]
-            # 一般怀疑，N是图片的个数
-            # 不是图片的个数，应该是surface point的个数
 
             # Sample points for the eikonal loss
-            # 什么jb玩意
             eik_bounding_box = self.object_bounding_sphere
             n_eik_points = batch_size * num_pixels // 2
             eikonal_points = torch.empty(n_eik_points, 3).uniform_(-eik_bounding_box, eik_bounding_box).cuda()
@@ -254,11 +215,7 @@ class IDRNetwork(nn.Module):
 
             points_all = torch.cat([surface_points, eikonal_points], dim=0)
 
-            output = self.implicit_network(surface_points, self.encoding_volume)
-            print('output.shape', output.shape)
-            # 会变
-            # [xxx, 257]
-            # 合理猜测xxx是surface_points的大小
+            output = self.implicit_network(surface_points)
             surface_sdf_values = output[:N, 0:1].detach()
 
             g = self.implicit_network.gradient(points_all)
@@ -271,12 +228,8 @@ class IDRNetwork(nn.Module):
                                                                 surface_dists,
                                                                 surface_cam_loc,
                                                                 surface_ray_dirs)
-            print('differentiable_surface_points.shape', differentiable_surface_points.shape)
-            # [xxx, 3]
 
         else:
-            # 不train的时候在干啥
-            # infer吗
             surface_mask = network_object_mask
             differentiable_surface_points = points[surface_mask]
             grad_theta = None
@@ -299,12 +252,11 @@ class IDRNetwork(nn.Module):
         return output
 
     def get_rbg_value(self, points, view_dirs):
-        output = self.implicit_network(points, self.encoding_volume)
+        output = self.implicit_network(points)
         g = self.implicit_network.gradient(points)
         normals = g[:, 0, :]
 
         feature_vectors = output[:, 1:]
-        # geometry vector
         rgb_vals = self.rendering_network(points, normals, view_dirs, feature_vectors)
 
         return rgb_vals

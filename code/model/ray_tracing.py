@@ -30,13 +30,22 @@ class RayTracing(nn.Module):
                 ray_directions
                 ):
 
+        # print("cam_loc shape: ", cam_loc.shape) [1, 3]
+        # print("cam_loc", cam_loc) [ 1.9867, -0.2555, -0.8857]
+        # print("object_mask shape: ", object_mask.shape) [2048]
+        # print("object_mask", object_mask[:5]) [True/False]
+        # print("ray_dir shape: ", ray_directions.shape) [1, 2048, 3]
+        # print("ray_dir", ray_directions[:, :5, :]) （单位向量）
         batch_size, num_pixels, _ = ray_directions.shape
 
         sphere_intersections, mask_intersect = rend_util.get_sphere_intersection(cam_loc, ray_directions, r=self.object_bounding_sphere)
+        # 判断从cam_loc以ray_dir方向出发的射线是否与以世界坐标原点为圆心，r为半径的球相交
+        # mask_intersect保存所有有交点的mask
+        # sphere_intersections保存了所有有交点的射线的交点参数（c + tv中的t），每条射线保存一近一远两个交点，已舍掉所有负值？
 
         curr_start_points, unfinished_mask_start, acc_start_dis, acc_end_dis, min_dis, max_dis = \
             self.sphere_tracing(batch_size, num_pixels, sdf, cam_loc, ray_directions, mask_intersect, sphere_intersections)
-
+        # print(curr_start_points, 'curr_start_points111111111111', curr_start_points.shape)
         network_object_mask = (acc_start_dis < acc_end_dis)
 
         # The non convergent rays should be handled by the sampler
@@ -47,13 +56,7 @@ class RayTracing(nn.Module):
             sampler_min_max.reshape(-1, 2)[sampler_mask, 0] = acc_start_dis[sampler_mask]
             sampler_min_max.reshape(-1, 2)[sampler_mask, 1] = acc_end_dis[sampler_mask]
 
-            sampler_pts, sampler_net_obj_mask, sampler_dists = self.ray_sampler(sdf,
-                                                                                cam_loc,
-                                                                                object_mask,
-                                                                                ray_directions,
-                                                                                sampler_min_max,
-                                                                                sampler_mask
-                                                                                )
+            sampler_pts, sampler_net_obj_mask, sampler_dists = self.ray_sampler(sdf, cam_loc, object_mask, ray_directions, sampler_min_max, sampler_mask)
 
             curr_start_points[sampler_mask] = sampler_pts[sampler_mask]
             acc_start_dis[sampler_mask] = sampler_dists[sampler_mask]
@@ -100,21 +103,50 @@ class RayTracing(nn.Module):
     def sphere_tracing(self, batch_size, num_pixels, sdf, cam_loc, ray_directions, mask_intersect, sphere_intersections):
         ''' Run sphere tracing algorithm for max iterations from both sides of unit sphere intersection '''
 
+        # print("cam_loc", cam_loc)
+        # tensor([[ 0.7600,  1.6328, -1.0440]], device='cuda:0')
+
+        # print("ray_directions", ray_directions[:, :5, :])
+        # tensor([[[-0.2602, -0.8086,  0.5276],
+        #  [-0.3948, -0.8444,  0.3622],
+        #  [ 0.0104, -0.9417,  0.3362],
+        #  [-0.1859, -0.8173,  0.5454],
+        #  [-0.1802, -0.9168,  0.3564]]], device='cuda:0')
+
+        # print("mask_intersect", mask_intersect[:, :5])
+        # tensor([[True, True, True, True, True]], device='cuda:0')
+
+        # print("sphere_intersections", sphere_intersections[:, :5, :])
+        # tensor([[[1.0958, 3.0421],
+        #  [1.1097, 3.0040],
+        #  [1.4294, 2.3323],
+        #  [1.1237, 2.9667],
+        #  [1.1751, 2.8369]]], device='cuda:0')
+
+
         sphere_intersections_points = cam_loc.reshape(batch_size, 1, 1, 3) + sphere_intersections.unsqueeze(-1) * ray_directions.unsqueeze(2)
+        # sphere_intersections_points 每条射线与单位球的两个交点的世界坐标
+        # [1, 2048, 2, 3]
         unfinished_mask_start = mask_intersect.reshape(-1).clone()
         unfinished_mask_end = mask_intersect.reshape(-1).clone()
 
         # Initialize start current points
         curr_start_points = torch.zeros(batch_size * num_pixels, 3).cuda().float()
         curr_start_points[unfinished_mask_start] = sphere_intersections_points[:,:,0,:].reshape(-1,3)[unfinished_mask_start]
+        # 所有近端的交点坐标
+        # [2048, 3]
         acc_start_dis = torch.zeros(batch_size * num_pixels).cuda().float()
         acc_start_dis[unfinished_mask_start] = sphere_intersections.reshape(-1,2)[unfinished_mask_start,0]
+        # 所有近端点到相机点的距离
 
         # Initialize end current points
         curr_end_points = torch.zeros(batch_size * num_pixels, 3).cuda().float()
         curr_end_points[unfinished_mask_end] = sphere_intersections_points[:,:,1,:].reshape(-1,3)[unfinished_mask_end]
+        # 所有远端的交点坐标
+        # [2048, 3]
         acc_end_dis = torch.zeros(batch_size * num_pixels).cuda().float()
         acc_end_dis[unfinished_mask_end] = sphere_intersections.reshape(-1,2)[unfinished_mask_end,1]
+        # 所有远端点到相机点的距离
 
         # Initizliae min and max depth
         min_dis = acc_start_dis.clone()

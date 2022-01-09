@@ -44,9 +44,10 @@ class IDRLoss(nn.Module):
         mask_loss = self.get_mask_loss(model_outputs['sdf_output'], network_object_mask, object_mask)
         eikonal_loss = self.get_eikonal_loss(model_outputs['grad_theta'])
 
-        loss = rgb_loss + \
-               self.eikonal_weight * eikonal_loss + \
-               self.mask_weight * mask_loss
+        # loss = rgb_loss + \
+        #        self.eikonal_weight * eikonal_loss + \
+        #        self.mask_weight * mask_loss
+        loss = self.eikonal_weight * eikonal_loss + self.mask_weight * mask_loss
 
         return {
             'loss': loss,
